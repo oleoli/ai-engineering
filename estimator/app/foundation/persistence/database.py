@@ -1,20 +1,33 @@
 """SQLAlchemy engine, session factory and per-request session helpers.
 
-We use the *synchronous* SQLAlchemy 2.0 API. The ingestion paths in this module
-are not on the hot user request path — they run as BackgroundTasks or one-shot
-admin operations — so we trade async ergonomics for simplicity and less
-moving infrastructure during teaching.
+The sync API backs Session 6 ingestion BackgroundTasks. The async API backs
+Session 8 embedding persistence (``POST /embeddings/ingest``).
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from functools import lru_cache
 
 from sqlalchemy import Engine, create_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
+
+
+def _async_database_url(sync_url: str) -> str:
+    """Derive an asyncpg URL from the sync psycopg URL in settings."""
+    if "+psycopg" in sync_url:
+        return sync_url.replace("+psycopg", "+asyncpg", 1)
+    if sync_url.startswith("postgresql://"):
+        return sync_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return sync_url
 
 
 @lru_cache
@@ -27,12 +40,27 @@ def create_engine_from_settings() -> Engine:
     )
 
 
+@lru_cache
+def create_async_engine_from_settings() -> AsyncEngine:
+    """Build the global async engine (singleton)."""
+    return create_async_engine(
+        _async_database_url(get_settings().DATABASE_URL),
+        pool_pre_ping=True,
+    )
+
+
 SessionLocal = sessionmaker(
     bind=create_engine_from_settings(),
     autoflush=False,
     autocommit=False,
     expire_on_commit=False,
     future=True,
+)
+
+AsyncSessionLocal = async_sessionmaker(
+    bind=create_async_engine_from_settings(),
+    autoflush=False,
+    expire_on_commit=False,
 )
 
 
@@ -43,3 +71,9 @@ def get_session() -> Iterator[Session]:
         yield session
     finally:
         session.close()
+
+
+async def get_async_session() -> AsyncIterator[AsyncSession]:
+    """FastAPI dependency that yields an AsyncSession within a context manager."""
+    async with AsyncSessionLocal() as session:
+        yield session

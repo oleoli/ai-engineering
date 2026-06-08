@@ -78,20 +78,15 @@ class EmbeddedChunk(Chunk):
 class IngestRequest(BaseModel):
     """Payload for ``POST /embeddings/ingest``."""
 
-    budgets: list[Budget] = Field(min_length=1, description="Budgets to chunk and embed.")
-
-
-class IngestStats(BaseModel):
-    """Aggregate counters returned with an ingest response."""
-
-    total_budgets: int = Field(ge=0)
-    total_chunks: int = Field(ge=0)
-    total_tokens: int = Field(ge=0)
-    estimated_cost_usd: float = Field(ge=0.0)
+    source_path: str = Field(description="Filesystem path of the ingested document.")
+    document_type: str = Field(description="Document type label, e.g. 'historical_budget'.")
+    content: Budget = Field(description="Full budget JSON as produced by the chunker input.")
 
 
 class IngestResponse(BaseModel):
     """Response for ``POST /embeddings/ingest``."""
 
-    chunks: list[EmbeddedChunk]
-    stats: IngestStats
+    document_id: int
+    chunks_created: int = Field(ge=0)
+    embedding_dimension: int = Field(ge=1)
+    ingestion_time_ms: int = Field(ge=0)
