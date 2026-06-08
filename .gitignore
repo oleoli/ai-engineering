@@ -9,3 +9,4 @@ guides/
 .vscode/
 __pycache__/
 .claude/
+docs/*

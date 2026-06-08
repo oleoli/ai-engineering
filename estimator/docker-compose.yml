@@ -17,7 +17,8 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgresql+psycopg://estimator:estimator@estimator-postgres:5432/estimator
-
+    #psycopg o asyncpg??
+    
     depends_on:
       redis:
         condition: service_healthy
@@ -93,9 +94,9 @@ services:
       - estimator_postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "estimator", "-d", "estimator"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
     restart: unless-stopped
 
 volumes:
