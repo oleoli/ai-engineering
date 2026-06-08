@@ -90,3 +90,30 @@ class IngestResponse(BaseModel):
     chunks_created: int = Field(ge=0)
     embedding_dimension: int = Field(ge=1)
     ingestion_time_ms: int = Field(ge=0)
+
+
+class SearchRequest(BaseModel):
+    """Payload for ``POST /embeddings/search``."""
+
+    query: str = Field(min_length=1, description="Natural-language search text.")
+    k: int = Field(default=5, ge=1, le=50, description="Number of chunks to return.")
+
+
+class SearchResultItem(BaseModel):
+    """A single chunk returned by semantic search."""
+
+    chunk_id: int
+    document_id: int
+    chunk_type: str
+    content: str
+    distance: float
+    metadata: dict
+
+
+class SearchResponse(BaseModel):
+    """Response for ``POST /embeddings/search``."""
+
+    query: str
+    k: int
+    search_time_ms: int = Field(ge=0)
+    results: list[SearchResultItem]

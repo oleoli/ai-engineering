@@ -24,8 +24,15 @@ from app.generation.rag.analysis.comparison import (
     CompareResponse,
 )
 from app.generation.rag.embedding.embedder import EMBEDDING_DIM, OpenAIEmbedder
-from app.generation.rag.schemas import IngestRequest, IngestResponse
+from app.generation.rag.schemas import (
+    IngestRequest,
+    IngestResponse,
+    SearchRequest,
+    SearchResponse,
+    SearchResultItem,
+)
 from app.generation.rag.store.models import ChunkRow, DocumentRow
+from app.generation.rag.store.search import search_similar_chunks
 
 log = structlog.get_logger()
 
@@ -108,6 +115,54 @@ async def ingest(
         ingestion_time_ms=ingestion_time_ms,
     )
     log.info("embeddings_ingest_done", **response.model_dump())
+    return response
+
+
+@router.post("/search", response_model=SearchResponse)
+async def search(
+    request: SearchRequest,
+    session: AsyncSession = Depends(get_async_session),
+    embedder: OpenAIEmbedder | None = Depends(get_embedder),
+    ) -> SearchResponse:
+    """Embed a query and return the top-k most similar persisted chunks."""
+    if embedder is None:
+        log.error("embeddings_search_failed", reason="embedder_unavailable")
+        raise HTTPException(status_code=500, detail="Embedding service is not available.")
+
+    t0 = time.perf_counter()
+    log.info("embeddings_search_received", query_len=len(request.query), k=request.k)
+
+    try:
+        query_vector = await run_in_threadpool(embedder.embed_one, request.query)
+    except Exception as exc:  # noqa: BLE001 — any embedding-API failure becomes a 500.
+        log.error(
+            "embeddings_search_failed",
+            reason="embedding_api_error",
+            error_type=type(exc).__name__,
+            error=str(exc)[:300],
+        )
+        raise HTTPException(status_code=500, detail="Failed to embed query.") from exc
+
+    rows = await search_similar_chunks(session, query_vector, request.k)
+    results = [
+        SearchResultItem(
+            chunk_id=row.id,
+            document_id=row.document_id,
+            chunk_type=row.chunk_type,
+            content=row.content,
+            distance=float(row.distance),
+            metadata=row.chunk_metadata,
+        )
+        for row in rows
+    ]
+
+    response = SearchResponse(
+        query=request.query,
+        k=request.k,
+        search_time_ms=round((time.perf_counter() - t0) * 1000),
+        results=results,
+    )
+    log.info("embeddings_search_done", **response.model_dump(exclude={"results"}), results_count=len(results))
     return response
 
 

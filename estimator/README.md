@@ -322,6 +322,142 @@ Las estrategias `semantic`, `propositional` y `contextual_retrieval` llaman a AP
 - **Fuera de scope** → **Sesión 08**: persistencia vectorial (pgvector), búsqueda semántica / retrieval real y métricas formales de retrieval (recall@k, NDCG).
 - El guion del directo está en `guides/session-7-live-guide.md` (git-ignored, material de instructor).
 
+## Sesión 8 (pre-ejercicio) — Persistencia pgvector y búsqueda semántica
+
+Primer paso hacia el RAG persistente de la Sesión 08 completa. Reutiliza el chunker estructural y el `OpenAIEmbedder` de la Sesión 07, pero **cambia el contrato de ingesta**: `POST /embeddings/ingest` deja de devolver vectores en memoria y pasa a escribirlos en Postgres (`documents` + `chunks`). Se añade `POST /embeddings/search` para recuperar los top-k chunks por distancia coseno. `POST /embeddings/compare` sigue siendo in-memory (sin tocar la BD).
+
+### Pasos implementados
+
+1. **Migración Alembic `0002_session8_pre`** — activa la extensión `vector` y crea las tablas `documents` y `chunks` (columna `embedding vector(1536)`, índice GIN sobre `metadata`). Cadena: `0001_session6_initial` → `0002_session8_pre`.
+
+2. **`alembic/env.py` + `alembic.ini`** — la URL sale de la variable de entorno `DATABASE_URL` (fallback a `Settings`). Antes de ejecutar migraciones se registra `pgvector.sqlalchemy.Vector` en el dialecto para que `alembic check` y el autogenerate reconozcan columnas `vector` sin generar diffs inconsistentes.
+
+3. **Capa de persistencia dual** (`app/foundation/persistence/database.py`):
+   - **Sync + `psycopg`** — Sesión 6 (`BackgroundTasks` de ingesta batch, Alembic).
+   - **Async + `asyncpg`** — Sesión 8 (`get_async_session`, derivado automáticamente de `DATABASE_URL` sustituyendo `+psycopg` por `+asyncpg`).
+
+4. **Modelos ORM** (`app/generation/rag/store/models.py`) — `DocumentRow` y `ChunkRow` mapean las tablas nuevas. El paquete `app/generation/rag/store/` expone también `search_similar_chunks`.
+
+5. **Endpoints** (`app/api/embeddings.py`):
+   - `POST /embeddings/ingest` — chunk → embed (en threadpool) → persistencia en una transacción. Idempotencia por `source_path`: reingestar el mismo path devuelve **409**.
+   - `POST /embeddings/search` — embed de la query + ranking por `cosine_distance` sobre chunks persistidos.
+
+### Decisiones de diseño
+
+1. **Normalización 1:N (`documents` → `chunks`).** La relación presupuesto–fragmento es uno-a-muchos: un documento origen genera varios chunks. Desnormalizar todo en una sola tabla violaría la **3FN** (atributos del documento repetidos en cada fila de chunk), introduciría **anomalías de actualización** y dificultaría garantizar **integridad referencial**. El modelo relacional estándar es entidad padre + entidad hija con **clave foránea** (`chunks.document_id → documents.id`) y **`ON DELETE CASCADE`**, de modo que la eliminación del padre propaga de forma consistente a los hijos sin huérfanos.
+
+2. **Esquema híbrido: columnas tipadas + JSONB.** Los atributos con cardinalidad y tipo conocidos (`document_type`, `chunk_type`, timestamps) van en columnas SQL con restricciones `NOT NULL` donde aplica: el motor puede indexarlos, validarlos y documentarlos en el catálogo. Los atributos extensibles —los que el pipeline de chunking puede ir añadiendo— se delegan a **`metadata JSONB`**, patrón habitual cuando el esquema evoluciona más rápido que las migraciones. El **índice GIN** sobre JSONB habilita predicados por clave (`@>`, `?`, `->>`) sin alterar el DDL cada vez que aparece un nuevo campo de metadata.
+
+3. **Dimensión fija del tipo `vector(1536)`.** En pgvector la dimensionalidad es parte de la definición de columna, no un valor runtime. Fijarla en **1536** alinea el esquema con el modelo de embeddings del proyecto (`text-embedding-3-small`). Cambiar esa dimensión posteriormente exige **migración destructiva** y **re-indexación completa** del corpus; por eso se trata como invariante de diseño, no como configuración dinámica.
+
+4. **`embedding` nullable (columna opcional en fase de ingesta).** A nivel de restricciones, `NULL` distingue «chunk persistido sin vector aún» de «chunk listo para búsqueda». Permite un patrón con **pipelines por fases** (persistir texto → calcular embedding → actualizar fila) frente al commit atómico que usa este ejercicio. El endpoint actual escribe texto y vector en la misma transacción; la nulabilidad reserva el esquema para **ingesta desacoplada** en fases posteriores sin otra migración.
+
+### Infraestructura
+
+Levantar Postgres (pgvector) y el servicio:
+
+```bash
+# Desde estimator/ (aislado) o desde ai-engineering/ (monorepo)
+docker compose up -d estimator-postgres estimator
+```
+
+Al arrancar, el contenedor `estimator` ejecuta `alembic upgrade head` antes de uvicorn. Postgres del estimator escucha en el host en el puerto **5433** (`estimator-postgres`, usuario `estimator`); no confundir con el `postgres` de Rails (puerto 5432, usuario `postgres`).
+
+Comprobar migraciones y esquema:
+
+```bash
+docker compose exec estimator alembic current
+# Debe mostrar 0002_session8_pre (head)
+
+docker compose exec estimator alembic check
+# Sin drift entre modelos y BD
+
+docker compose exec estimator-postgres psql -U estimator -d estimator -c "\dt"
+docker compose exec estimator-postgres psql -U estimator -d estimator \
+  -c "SELECT extname FROM pg_extension WHERE extname = 'vector';"
+```
+
+Si el contenedor falla con `Can't locate revision identified by '0002_session8_pgvector'`, el volumen de Postgres conserva una revisión de otra rama. Opciones: borrar el volumen (`docker volume rm …_estimator_postgres_data`) o alinear con `alembic stamp`.
+
+### Probar los endpoints
+
+Necesitas `OPENAI_API_KEY` en `.env` (el embedder llama a `text-embedding-3-small`).
+
+**1. Ingestar un presupuesto** — el body lleva un único `Budget` (no un array). Construye un JSON con `source_path`, `document_type` y `content` (un elemento de `data/budgets_sample.json`):
+
+```bash
+# Generar el payload (Linux/macOS o PowerShell con Python en PATH)
+python -c "
+import json
+budget = json.load(open('data/budgets_sample.json'))[0]
+payload = {
+    'source_path': 'data/budgets_sample.json#BUD-2024-001',
+    'document_type': 'historical_budget',
+    'content': budget,
+}
+json.dump(payload, open('ingest_payload.json', 'w'))
+"
+
+# Enviar
+curl -s -X POST http://localhost:8000/embeddings/ingest \
+  -H 'Content-Type: application/json' \
+  -d @ingest_payload.json | python -m json.tool
+
+# Equivalente con httpie
+http POST :8000/embeddings/ingest < ingest_payload.json
+```
+
+Respuesta esperada (200):
+
+```json
+{
+  "document_id": 1,
+  "chunks_created": 4,
+  "embedding_dimension": 1536,
+  "ingestion_time_ms": 850
+}
+```
+
+Repetir la misma petición devuelve **409** con `document_id` del registro existente.
+
+**2. Búsqueda semántica** — solo devuelve chunks ya persistidos por `/ingest`:
+
+```bash
+http POST :8000/embeddings/search \
+  query="OAuth 2.0 authentication backend for fintech mobile banking" \
+  k:=3
+```
+
+Respuesta esperada (200): `results[]` con `chunk_id`, `content`, `distance` (coseno; menor = más similar) y `metadata`.
+
+**3. Verificar filas en Postgres**:
+
+```bash
+docker compose exec estimator-postgres psql -U estimator -d estimator \
+  -c "SELECT id, source_path FROM documents;"
+docker compose exec estimator-postgres psql -U estimator -d estimator \
+  -c "SELECT id, document_id, chunk_type, left(content, 60) AS preview FROM chunks LIMIT 5;"
+```
+
+**4. Chunking Lab sin persistir** — `/embeddings/compare` sigue igual que en Sesión 07 (estrategias en memoria, útil para el cliente Rails).
+
+### Tests automatizados
+
+Todavía no hay tests de integración con Postgres real para esta fase. La batería existente sigue pasando sin tocar la API de embeddings:
+
+```bash
+uv run pytest
+```
+
+La validación de la sesión 8 pre es manual: migración aplicada, ingest 200 → search con resultados coherentes, re-ingest 409, y `alembic check` limpio.
+
+### Dependencias y scope
+
+- Nuevas / relevantes: `asyncpg`, `pgvector` (además de `psycopg` y `sqlalchemy` de Sesión 6).
+- **Dentro de scope (pre)**: tablas pgvector, ingest persistente, search standalone.
+- **Fuera de scope (Sesión 08 completa)**: índice HNSW, integración del retriever en `estimate()`, métricas formales de retrieval (recall@k, NDCG), cliente Rails para search.
+
 ---
 
 > Este proyecto forma parte del **Master en AI Engineering** y es la base sobre la que se construye en directo el resto de la Sesión 04 (output estructurado, guardrails, cache semántico) y de la Sesión 05 (compresión avanzada de memoria con anclas, tier dinámico, patrón Actor-Critic-Boss).
+
