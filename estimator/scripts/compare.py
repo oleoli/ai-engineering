@@ -1,73 +1,161 @@
 #!/usr/bin/env python3
-"""Embedding sanity check — cosine similarity between two texts.
+"""Semantic search sanity check — five representative queries against /embeddings/search.
 
-Embeds two texts with ``text-embedding-3-small`` (reusing ``OpenAIEmbedder``)
-and prints their cosine similarity. Cosine is computed by hand with the stdlib
-``math`` module — no numpy / scikit-learn.
+Invokes ``POST /embeddings/search`` with five queries that exercise the ingested
+corpus from different angles (direct match, semantic reformulation, out-of-domain,
+ambiguous, and highly specific). Prints the top-k results per query.
+
+Requires the estimator service running with the corpus already ingested via
+``POST /embeddings/ingest``.
 
 Usage::
 
-    # outside the container (from the estimator/ dir, with .env present):
-    uv run python scripts/compare.py \\
-        --text-a "OAuth 2.0 authentication backend for fintech" \\
-        --text-b "JWT-based authorization service for banking app"
+    # outside the container (from the estimator/ dir):
+    uv run python scripts/compare.py
 
     # inside the container:
-    docker compose exec estimator python scripts/compare.py \\
-        --text-a "..." --text-b "..."
+    docker compose exec estimator python scripts/compare.py
+
+    # override base URL or result count:
+    uv run python scripts/compare.py --base-url http://localhost:8000 --k 5
 """
 
 from __future__ import annotations
 
 import argparse
-import math
+import os
+import re
 import sys
 from pathlib import Path
+
+import httpx
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from openai import OpenAI  # noqa: E402
-
 from app.config import get_settings  # noqa: E402
-from app.generation.rag.embedding.embedder import OpenAIEmbedder  # noqa: E402
+
+# (label, query) — each label describes the retrieval angle being tested.
+REPRESENTATIVE_QUERIES: list[tuple[str, str]] = [
+    (
+        "direct",
+        "REST API development with JWT authentication for financial sector",
+    ),
+    (
+        "semantic",
+        "secure backend service with token-based access control for banking applications",
+    ),
+    (
+        "out_of_domain",
+        "mobile application for restaurant reservations",
+    ),
+    (
+        "ambiguous",
+        "integration with external system",
+    ),
+    (
+        "specific",
+        "migration from monolith to microservices architecture using Kubernetes",
+    ),
+]
+
+CONTENT_PREVIEW_LEN = 120
 
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Dot product divided by the product of the L2 norms."""
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(y * y for y in b))
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+def _preview(content: str, max_len: int = CONTENT_PREVIEW_LEN) -> str:
+    """First ~max_len characters on a single line."""
+    collapsed = re.sub(r"\s+", " ", content).strip()
+    if len(collapsed) <= max_len:
+        return collapsed
+    return collapsed[: max_len - 1] + "…"
+
+
+def _print_results(label: str, query: str, results: list[dict]) -> None:
+    print(f"\n=== [{label}] {query} ===")
+    if not results:
+        print("  (no results)")
+        return
+    for rank, item in enumerate(results, 1):
+        chunk_id = item.get("chunk_id", "?")
+        distance = item.get("distance", 0.0)
+        chunk_type = item.get("chunk_type", "?")
+        content = _preview(item.get("content", ""))
+        print(
+            f"  {rank}. chunk_id={chunk_id}  dist={distance:.4f}  "
+            f"type={chunk_type}  {content}"
+        )
+
+
+def run_search(base_url: str, query: str, k: int) -> tuple[int, dict | str]:
+    """POST to /embeddings/search; return (status_code, parsed_json_or_error_text)."""
+    url = f"{base_url.rstrip('/')}/embeddings/search"
+    try:
+        response = httpx.post(url, json={"query": query, "k": k}, timeout=60.0)
+    except httpx.ConnectError:
+        return 0, (
+            f"Cannot connect to {url}. "
+            "Start the service (docker compose up / uvicorn) and ingest the corpus first."
+        )
+    except httpx.HTTPError as exc:
+        return 0, f"HTTP error: {exc}"
+
+    try:
+        body = response.json()
+    except ValueError:
+        body = response.text
+    return response.status_code, body
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Cosine similarity between two embedded texts.")
-    parser.add_argument("--text-a", required=True, help="First text.")
-    parser.add_argument("--text-b", required=True, help="Second text.")
+    parser = argparse.ArgumentParser(
+        description="Run five representative semantic-search queries against /embeddings/search."
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Estimator base URL (default: ESTIMATOR_API_BASE_URL or http://localhost:8000).",
+    )
+    parser.add_argument(
+        "--k",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Number of results per query (default: 5).",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
-    if not settings.OPENAI_API_KEY:
-        print("ERROR: OPENAI_API_KEY is not set (check your .env).", file=sys.stderr)
-        return 1
-
-    embedder = OpenAIEmbedder(
-        client=OpenAI(api_key=settings.OPENAI_API_KEY),
-        model=settings.EMBEDDING_MODEL,
+    base_url = (
+        args.base_url
+        or os.getenv("ESTIMATOR_API_BASE_URL")
+        or settings.ESTIMATOR_API_BASE_URL
     )
 
-    vec_a = embedder.embed_one(args.text_a)
-    vec_b = embedder.embed_one(args.text_b)
-    similarity = cosine_similarity(vec_a, vec_b)
+    print(f"Target: {base_url.rstrip('/')}/embeddings/search  (k={args.k})")
+    print(f"Queries: {len(REPRESENTATIVE_QUERIES)}")
 
-    print(f"Text A: {args.text_a}")
-    print(f"Text B: {args.text_b}")
-    print(f"Cosine similarity: {similarity:.4f}")
-    return 0
+    exit_code = 0
+    for label, query in REPRESENTATIVE_QUERIES:
+        status, body = run_search(base_url, query, args.k)
+        if status == 0:
+            print(f"\n=== [{label}] {query} ===", file=sys.stderr)
+            print(f"ERROR: {body}", file=sys.stderr)
+            exit_code = 1
+            break
+        if status != 200:
+            print(f"\n=== [{label}] {query} ===", file=sys.stderr)
+            detail = body if isinstance(body, str) else body.get("detail", body)
+            print(f"ERROR: HTTP {status} — {detail}", file=sys.stderr)
+            exit_code = 1
+            continue
+
+        results = body.get("results", []) if isinstance(body, dict) else []
+        search_ms = body.get("search_time_ms", "?") if isinstance(body, dict) else "?"
+        _print_results(label, query, results)
+        print(f"  ({search_ms} ms)")
+
+    return exit_code
 
 
 if __name__ == "__main__":

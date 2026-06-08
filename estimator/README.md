@@ -269,20 +269,22 @@ Con el sample: 15 presupuestos → 52 chunks → ~4.1k tokens → coste estimado
 
 ### Script CLI `compare.py`
 
-Sanity check de los embeddings: embebe dos textos y devuelve su similitud coseno (calculada a mano, sin numpy). Reutiliza `OpenAIEmbedder`.
+Sanity check de búsqueda semántica: invoca `POST /embeddings/search` con cinco queries representativas (match directo, reformulación semántica, dominio distinto, consulta ambigua y consulta muy específica) e imprime el top-5 de cada una con `chunk_id`, `distance`, `chunk_type` y un preview del `content`.
+
+Requiere el servicio levantado y el corpus ya ingestado vía `POST /embeddings/ingest`.
 
 ```bash
-# Fuera del contenedor (desde estimator/, con el .env cargado):
-uv run python scripts/compare.py \
-  --text-a "OAuth 2.0 authentication backend for fintech" \
-  --text-b "JWT-based authorization service for banking app"
+# Fuera del contenedor (desde estimator/):
+uv run python scripts/compare.py
 
 # Dentro del contenedor (scripts/ está bind-montado en docker-compose.yml):
-docker compose exec estimator python scripts/compare.py \
-  --text-a "..." --text-b "..."
+docker compose exec estimator python scripts/compare.py
+
+# Opcional: cambiar base URL o número de resultados
+uv run python scripts/compare.py --base-url http://localhost:8000 --k 5
 ```
 
-Los resultados de las tres parejas de validación del enunciado están en [`app/generation/rag/SANITY_CHECK.md`](app/generation/rag/SANITY_CHECK.md).
+La base URL se lee de `ESTIMATOR_API_BASE_URL` (default `http://localhost:8000`).
 
 ### Comparativa de estrategias de chunking (sesión en vivo)
 
