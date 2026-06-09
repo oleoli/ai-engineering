@@ -271,7 +271,7 @@ Con el sample: 15 presupuestos → 52 chunks → ~4.1k tokens → coste estimado
 
 Sanity check de búsqueda semántica: invoca `POST /embeddings/search` con cinco queries representativas (match directo, reformulación semántica, dominio distinto, consulta ambigua y consulta muy específica) e imprime el top-5 de cada una con `chunk_id`, `distance`, `chunk_type` y un preview del `content`.
 
-Requiere el servicio levantado y el corpus ya ingestado vía `POST /embeddings/ingest`.
+Requiere el servicio levantado y el corpus ya ingestado (`scripts/ingest_corpus.py` o `POST /embeddings/ingest`).
 
 ```bash
 # Fuera del contenedor (desde estimator/):
@@ -326,7 +326,7 @@ Las estrategias `semantic`, `propositional` y `contextual_retrieval` llaman a AP
 
 ## Sesión 8 (pre-ejercicio) — Persistencia pgvector y búsqueda semántica
 
-Primer paso hacia el RAG persistente de la Sesión 08 completa. Reutiliza el chunker estructural y el `OpenAIEmbedder` de la Sesión 07, pero **cambia el contrato de ingesta**: `POST /embeddings/ingest` deja de devolver vectores en memoria y pasa a escribirlos en Postgres (`documents` + `chunks`). Se añade `POST /embeddings/search` para recuperar los top-k chunks por distancia coseno. `POST /embeddings/compare` sigue siendo in-memory (sin tocar la BD).
+Primer paso hacia el RAG persistente de la Sesión 08 completa. Reutiliza el chunker estructural y el `OpenAIEmbedder` de la Sesión 07, pero **cambia el contrato de ingesta**: `POST /embeddings/ingest` deja de devolver vectores en memoria y pasa a escribirlos en Postgres (`documents` + `chunks`). Se añade `POST /embeddings/search` para recuperar los top-k chunks por distancia coseno. El Chunking Lab (`POST /embeddings/compare`, `scripts/compare_chunkers.py`) sigue siendo in-memory; los scripts `ingest_corpus.py` y `compare.py` operan sobre el corpus persistido. Detalle en [Qué persiste y qué no](#qué-persiste-y-qué-no).
 
 ### Pasos implementados
 
@@ -356,12 +356,14 @@ Primer paso hacia el RAG persistente de la Sesión 08 completa. Reutiliza el chu
 
 ### Infraestructura
 
-Levantar Postgres (pgvector) y el servicio:
+Levantar Postgres (pgvector), Redis y el servicio:
 
 ```bash
 # Desde estimator/ (aislado) o desde ai-engineering/ (monorepo)
-docker compose up -d estimator-postgres estimator
+docker compose up -d estimator-postgres redis estimator
 ```
+
+`estimator` declara `depends_on` sobre `redis` y `estimator-postgres`, así que Compose los arranca aunque no los nombres en el comando; se listan explícitamente para dejar claro el stack completo. Redis no interviene en `/ingest` ni `/search` (cache del wrapper LLM de sesiones anteriores), pero `estimator` no arranca sin él.
 
 Al arrancar, el contenedor `estimator` ejecuta `alembic upgrade head` antes de uvicorn. Postgres del estimator escucha en el host en el puerto **5433** (`estimator-postgres`, usuario `estimator`); no confundir con el `postgres` de Rails (puerto 5432, usuario `postgres`).
 
@@ -381,11 +383,46 @@ docker compose exec estimator-postgres psql -U estimator -d estimator \
 
 Si el contenedor falla con `Can't locate revision identified by '0002_session8_pgvector'`, el volumen de Postgres conserva una revisión de otra rama. Opciones: borrar el volumen (`docker volume rm …_estimator_postgres_data`) o alinear con `alembic stamp`.
 
+#### flujo completo
+
+```bash
+docker compose up --build -d estimator-postgres redis estimator
+uv run python scripts/ingest_corpus.py
+uv run python scripts/compare.py
+```
+
 ### Probar los endpoints
 
 Necesitas `OPENAI_API_KEY` en `.env` (el embedder llama a `text-embedding-3-small`).
 
-**1. Ingestar un presupuesto** — el body lleva un único `Budget` (no un array). Construye un JSON con `source_path`, `document_type` y `content` (un elemento de `data/budgets_sample.json`):
+#### Qué persiste y qué no
+
+Desde la Sesión 8 (pre) el pipeline RAG **sí persiste** embeddings en Postgres (`documents` + `chunks` vía pgvector). No todo el ecosistema de embeddings escribe en BD: el **Chunking Lab** de la Sesión 07 sigue siendo deliberadamente in-memory.
+
+| Pieza | Persiste en Postgres | Notas |
+|---|---|---|
+| `POST /embeddings/ingest` | Sí | Chunk → embed → transacción en `documents` + `chunks` |
+| `POST /embeddings/search` | Sí (lectura) | Ranking por distancia coseno sobre chunks ya ingestados |
+| `scripts/ingest_corpus.py` | Sí (vía `/ingest`) | Carga los 15 presupuestos de `data/budgets_sample.json` |
+| `scripts/compare.py` | Sí (vía `/search`) | Cinco queries de sanity check contra el corpus persistido |
+| `POST /embeddings/compare` | **No** | Compara estrategias de chunking en memoria (Chunking Lab) |
+| `scripts/compare_chunkers.py` | **No** | CLI del Chunking Lab; usa `ChunkingComparator` sin tocar la BD |
+
+Flujo típico con persistencia: **ingestar** (`ingest_corpus.py` o `/ingest`) → **buscar** (`/search` o `compare.py`). El Chunking Lab (`/compare`, `compare_chunkers.py`) es independiente: sirve para evaluar estrategias de fragmentación sin ensuciar la BD.
+
+**1. Ingestar el corpus** — el endpoint acepta un único `Budget` por petición (no un array). Para cargar los 15 presupuestos de `data/budgets_sample.json` de una vez:
+
+```bash
+# Fuera del contenedor (desde estimator/):
+uv run python scripts/ingest_corpus.py
+
+# Dentro del contenedor:
+docker compose exec estimator python scripts/ingest_corpus.py
+```
+
+Re-ejecutar el script omite presupuestos ya ingestados (HTTP 409 por `source_path`).
+
+**Ingestar un presupuesto a mano** — construye un JSON con `source_path`, `document_type` y `content` (un elemento de `data/budgets_sample.json`):
 
 ```bash
 # Generar el payload (Linux/macOS o PowerShell con Python en PATH)
@@ -441,7 +478,30 @@ docker compose exec estimator-postgres psql -U estimator -d estimator \
   -c "SELECT id, document_id, chunk_type, left(content, 60) AS preview FROM chunks LIMIT 5;"
 ```
 
-**4. Chunking Lab sin persistir** — `/embeddings/compare` sigue igual que en Sesión 07 (estrategias en memoria, útil para el cliente Rails).
+**4. Chunking Lab (sin persistir)** — `POST /embeddings/compare` y `scripts/compare_chunkers.py` **no escriben en Postgres**. Siguen igual que en la Sesión 07: reciben presupuestos en el body, fragmentan con varias estrategias, embeben en memoria y devuelven estadísticos y top-k por consulta. Útil para el cliente Rails y para las demos de chunking; no sustituye a `/ingest` + `/search`.
+
+```bash
+# Endpoint HTTP (útil para el cliente Rails)
+http POST :8000/embeddings/compare \
+  budgets:="$(cat data/budgets_sample.json)" \
+  queries:='["OAuth authentication for fintech mobile app"]' \
+  strategies:='["structural","recursive"]' \
+  top_k:=3
+
+# CLI equivalente (desde estimator/)
+uv run python scripts/compare_chunkers.py --strategies structural,recursive \
+  --queries "OAuth authentication for fintech mobile app" --show-top-k 3
+```
+
+**5. Sanity check de búsqueda persistida** — `scripts/compare.py` invoca `POST /embeddings/search` (no confundir con `/embeddings/compare` ni con `compare_chunkers.py`). Ejecuta cinco queries representativas contra el corpus ya ingestado e imprime el top-5 de cada una. Requiere los pasos 1 y 2 completados.
+
+```bash
+uv run python scripts/compare.py
+# o dentro del contenedor:
+docker compose exec estimator python scripts/compare.py
+```
+
+Las cinco queries cubren: match directo, reformulación semántica, dominio distinto, consulta ambigua y consulta muy específica. Ver también la sección [Script CLI `compare.py`](#script-cli-comparepy) (Sesión 07).
 
 ### Tests automatizados
 
