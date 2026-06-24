@@ -44,5 +44,7 @@ def test_relational_indexes_present():
         "ix_chunks_document_id",
         "ix_chunks_chunk_type",
         "ix_chunks_metadata_gin",
+        # Session 10: GIN index over the generated content_tsv column (FTS).
+        "ix_chunks_content_tsv",
     }
     assert {index.name for index in DocumentRow.__table__.indexes} == {"ix_documents_source_path"}

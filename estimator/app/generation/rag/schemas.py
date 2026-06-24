@@ -273,7 +273,12 @@ class Estimate(BaseModel):
 
 
 class RetrievalRequest(BaseModel):
-    """Payload for ``POST /v1/retrieval/search`` (threshold + structural filters)."""
+    """Payload for ``POST /v1/retrieval/search`` (threshold + structural filters).
+
+    Session 10 adds the two hybrid/rerank overrides. Both are nullable: ``None``
+    means "fall back to the runtime override, then the .env default" (precedence
+    request → runtime → settings), so an unaware client keeps the S9 behaviour.
+    """
 
     query_text: str = Field(min_length=10, max_length=2000)
     top_k: int = Field(default=10, ge=1, le=30)
@@ -282,6 +287,13 @@ class RetrievalRequest(BaseModel):
     project_year_min: int | None = Field(default=None, ge=2010, le=2100)
     project_year_max: int | None = Field(default=None, ge=2010, le=2100)
     chunk_types: list[str] | None = None
+    # S10 per-request overrides (null = use the runtime/settings effective value).
+    search_mode: Literal["vector", "hybrid"] | None = Field(
+        default=None, description="Dense-only ('vector') or dense+lexical RRF ('hybrid')."
+    )
+    rerank: bool | None = Field(
+        default=None, description="Apply the cross-encoder reranker (recall-then-rerank)."
+    )
 
 
 class EstimateRequest(BaseModel):

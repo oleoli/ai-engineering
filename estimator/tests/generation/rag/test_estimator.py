@@ -88,7 +88,7 @@ def wire(monkeypatch):
             calls["reformulate"] += 1
             return EstimationQuery(function="ecommerce storefront", sector="ecommerce")
 
-        async def fake_search(query_embedding, **kwargs):
+        async def fake_search(**kwargs):
             calls["search"] += 1
             return retrieval
 
@@ -100,13 +100,22 @@ def wire(monkeypatch):
             calls["embed"] += 1
             return [0.0] * 1536
 
+        # S10: the orchestrator reads the hot retrieval switches; default config A.
+        fake_runtime_retrieval = SimpleNamespace(
+            effective_search_mode=lambda: "vector",
+            effective_rerank=lambda: False,
+        )
+
         monkeypatch.setattr(orch, "get_settings", lambda: _SETTINGS)
         monkeypatch.setattr(orch, "reformulate_query", fake_reformulate)
-        monkeypatch.setattr(orch, "search_chunks", fake_search)
+        monkeypatch.setattr(orch, "retrieve", fake_search)
         monkeypatch.setattr(orch, "generate_estimate", fake_generate)
         monkeypatch.setattr(deps, "get_embedder", lambda: SimpleNamespace(embed_one=fake_embed))
         monkeypatch.setattr(deps, "get_token_encoder", lambda: CharEncoder())
         monkeypatch.setattr(deps, "get_idempotency_store", lambda: store)
+        monkeypatch.setattr(
+            deps, "get_runtime_retrieval_config", lambda: fake_runtime_retrieval
+        )
         return calls, store
 
     return _wire

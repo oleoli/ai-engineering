@@ -24,7 +24,7 @@ from app.generation.rag.errors import GenerationError, MalformedEstimateError
 from app.generation.rag.observability import log_stage
 from app.generation.rag.prompt_builder import build_system_prompt, build_user_message
 from app.generation.rag.query_reformulator import compose_search_text, reformulate_query
-from app.generation.rag.retriever import search_chunks
+from app.generation.rag.retrieval import retrieve
 from app.generation.rag.schemas import Estimate, EstimationQuery
 from app.generation.rag.validation import check_coherence, validate_citations
 
@@ -166,12 +166,24 @@ async def estimate_from_transcript(
             raise GenerationError("Embedding service is not available (no OpenAI key).")
         query_embedding = await asyncio.to_thread(embedder.embed_one, search_text)
 
-    # 3. Metadata-filtered retrieval with soft-fail.
+    # 3. Metadata-filtered retrieval with soft-fail. The S9 pipeline inherits the
+    # S10 hybrid/rerank switches from the hot runtime config (request → runtime →
+    # .env); its contract (RetrievalResult + soft-fail) is unchanged.
+    from app.dependencies import get_runtime_retrieval_config
+
+    runtime_retrieval = get_runtime_retrieval_config()
+    search_mode = runtime_retrieval.effective_search_mode()
+    rerank = runtime_retrieval.effective_rerank()
     sector = query.sector.lower().strip() if query.sector else None
     sectors = [sector] if sector in _KNOWN_SECTORS else None
-    with log_stage("retrieval", request_id, sectors=sectors):
-        retrieval = await search_chunks(
-            query_embedding,
+    with log_stage(
+        "retrieval", request_id, sectors=sectors, search_mode=search_mode, rerank=rerank
+    ):
+        retrieval = await retrieve(
+            query_embedding=query_embedding,
+            query_text=search_text,
+            search_mode=search_mode,
+            rerank=rerank,
             top_k=settings.RETRIEVAL_TOP_K,
             distance_threshold=settings.RETRIEVAL_DISTANCE_THRESHOLD,
             sectors=sectors,

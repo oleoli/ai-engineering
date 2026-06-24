@@ -80,8 +80,15 @@ def generate_calls(monkeypatch):
 
     monkeypatch.setattr(orch, "get_settings", lambda: settings)
     monkeypatch.setattr(orch, "reformulate_query", fake_reformulate)
-    monkeypatch.setattr(orch, "search_chunks", fake_search)
+    monkeypatch.setattr(orch, "retrieve", fake_search)
     monkeypatch.setattr(orch, "generate_estimate", fake_generate)
+    monkeypatch.setattr(
+        deps,
+        "get_runtime_retrieval_config",
+        lambda: type(
+            "R", (), {"effective_search_mode": lambda self: "vector", "effective_rerank": lambda self: False}
+        )(),
+    )
     monkeypatch.setattr(
         deps,
         "get_embedder",

@@ -217,7 +217,14 @@ def test_existing_endpoints_still_work(client, monkeypatch):
         retrieval_router, "get_embedder",
         lambda: type("E", (), {"embed_one": staticmethod(lambda t: [0.0] * 1536)})(),
     )
-    monkeypatch.setattr(retrieval_router, "search_chunks", fake_search)
+    monkeypatch.setattr(retrieval_router, "retrieve", fake_search)
+    monkeypatch.setattr(
+        retrieval_router,
+        "get_runtime_retrieval_config",
+        lambda: type(
+            "R", (), {"effective_search_mode": lambda self: "vector", "effective_rerank": lambda self: False}
+        )(),
+    )
     monkeypatch.setattr(estimate_router, "estimate_from_transcript", fake_estimate)
 
     r1 = client.post(

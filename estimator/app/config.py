@@ -122,6 +122,28 @@ class Settings(BaseSettings):
     # Retrieval knobs (locked defaults from the Session 9 articles).
     RETRIEVAL_TOP_K: int = 10
     RETRIEVAL_DISTANCE_THRESHOLD: float = 0.6
+
+    # --- Session 10 fields (hybrid retrieval + reranking) ---------------------
+    # Default search strategy resolved when neither the request nor the runtime
+    # override pin one: "vector" (dense k-NN only) or "hybrid" (dense + lexical
+    # FTS fused with RRF). Overrideable per request and hot via
+    # ``RuntimeRetrievalConfig`` (PUT /api/v1/config/retrieval).
+    SEARCH_MODE: Literal["vector", "hybrid"] = "vector"
+    # RRF smoothing constant. ``score = Σ 1/(RRF_K + rank)`` (Cormack et al.).
+    # 60 is the canonical value; it dampens the weight of any single ranking's
+    # top positions so neither branch dominates the fusion.
+    RRF_K: int = 60
+    # Recall-then-rerank widths. The dense/hybrid recall pulls a broad candidate
+    # set (RECALL_TOP_K) that the cross-encoder rescas down to RERANK_TOP_N.
+    RETRIEVAL_RECALL_TOP_K: int = 50
+    RERANK_TOP_N: int = 5
+    # Whether reranking is on by default (overrideable per request and hot).
+    # Off by default: the cross-encoder downloads torch weights on first use and
+    # runs on CPU, so it stays opt-in.
+    RERANKER_ENABLED: bool = False
+    # Multilingual (ES+EN) cross-encoder, small enough for CPU. Loaded lazily on
+    # the first rerank, never at import/startup.
+    RERANKER_MODEL: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     # Token budget for the assembled <source> context block (tiktoken cl100k_base).
     MAX_CONTEXT_TOKENS: int = 16384
     # Idempotency cache for POST /v1/estimate/from-transcript (seconds; 24h).

@@ -1,0 +1,37 @@
+{
+  "description": "Golden retrieval set (Session 10). Five representative project-to-estimate descriptions, each annotated by hand with the historical projects that are genuinely relevant. The corpus now spans BOTH the coarse budget corpus (data/budgets_sample.json, chunk_type=budget_component, BUD-2024-*) and the task-granular historical corpus (data/task_corpus.json, chunk_type=historical_task, TASK-*). Each TASK-* project is a whole sector platform, so it is annotated relevant when its client_sector matches the query domain. Used by scripts/eval_retrieval_s10.py to measure precision@5 and latency across the four (search_mode x rerank) configurations. A retrieved chunk counts as relevant when its budget_id is in relevant_budget_ids.",
+  "corpus": ["data/budgets_sample.json", "data/task_corpus.json"],
+  "k": 5,
+  "queries": [
+    {
+      "id": "gq-01-banking-payments",
+      "query": "We are scoping a secure payments platform for a retail bank: real-time payment authorization and capture, streaming fraud detection on the authorization path, PSD2 open banking connectors with strong customer authentication, OAuth 2.0 / JWT auth and a double-entry transaction ledger with daily reconciliation.",
+      "relevant_budget_ids": ["BUD-2024-001", "BUD-2024-003", "BUD-2024-016", "TASK-2022-0004"],
+      "notes": "Banking/payments cluster: mobile banking API + PSD2 + OAuth (001), real-time payments gateway + fraud + reconciliation (003), the core-banking ledger migration with idempotent postings (016), plus the historical finance task breakdown (TASK-2022-0004: payment gateway, ledger & reconciliation, KYC/AML, OAuth)."
+    },
+    {
+      "id": "gq-02-healthcare-telemedicine",
+      "query": "Estimate a patient-facing healthcare platform: appointment scheduling with clinician availability, telemedicine video consultations, HL7/FHIR integration with the hospital EHR, plus clinical alerting on patient vitals and GDPR-aligned consent capture and access audit logging.",
+      "relevant_budget_ids": ["BUD-2024-009", "BUD-2024-010", "TASK-2025-0010", "TASK-2025-0012"],
+      "notes": "Clinical patient platforms: appointments + telemedicine + FHIR + consent/audit (009), remote patient monitoring with vitals alerting and a care-team dashboard (010), plus the historical healthcare task breakdowns (TASK-2025-0010, TASK-2025-0012: EHR records, HL7/FHIR, appointment scheduling, telemedicine sessions)."
+    },
+    {
+      "id": "gq-03-ecommerce-marketplace",
+      "query": "We need an online retail platform: a product catalog API with faceted search, a cart and checkout service with a promotion and tax engine, personalized product recommendations, plus multi-vendor onboarding with commission-based vendor payouts.",
+      "relevant_budget_ids": ["BUD-2024-005", "BUD-2024-006", "BUD-2024-017", "TASK-2022-0001", "TASK-2022-0011", "TASK-2024-0009", "TASK-2025-0008"],
+      "notes": "E-commerce cluster: headless storefront with catalog/cart/recommendations (005), multi-vendor marketplace with payouts (006), the bare-bones e-commerce MVP with login/list/cart/checkout (017), plus the historical ecommerce task breakdowns (TASK-2022-0001, TASK-2022-0011, TASK-2024-0009, TASK-2025-0008: product catalog, faceted search, cart & checkout, promotions, order management)."
+    },
+    {
+      "id": "gq-04-industrial-iot-maintenance",
+      "query": "Scope a factory IoT platform: ingest machine sensor telemetry over MQTT into a time-series store with edge buffering, run anomaly detection and predictive-maintenance models that flag machines at risk of failure, and surface alerts on operator dashboards.",
+      "relevant_budget_ids": ["BUD-2024-013", "BUD-2024-015", "TASK-2023-0005", "TASK-2023-0007", "TASK-2025-0002", "TASK-2025-0003", "TASK-2025-0006"],
+      "notes": "Industrial telemetry + analytics: factory IoT telemetry + predictive maintenance + SCADA dashboard (013), the energy-grid smart-meter pipeline with load forecasting and demand-response (015), plus the historical industrial task breakdowns (TASK-2023-0005, TASK-2023-0007, TASK-2025-0002, TASK-2025-0003, TASK-2025-0006: device telemetry ingestion, time-series storage, predictive maintenance, production scheduling)."
+    },
+    {
+      "id": "gq-05-logistics-warehouse",
+      "query": "Estimate a logistics and fulfillment system: warehouse management with putaway and picking and barcode scanning, capacity-aware delivery slot booking, and vehicle route optimization that batches orders into delivery runs under time-window and capacity constraints.",
+      "relevant_budget_ids": ["BUD-2024-007", "BUD-2024-014"],
+      "notes": "Logistics cluster: grocery delivery with slot booking + route optimization (007) and the warehouse management system with AGV coordination and yard scheduling (014). The task corpus has no logistics sector (finance/ecommerce/healthcare/industrial only), so there are no relevant TASK-* breakdowns for this query."
+    }
+  ]
+}

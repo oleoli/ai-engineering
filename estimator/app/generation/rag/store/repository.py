@@ -9,8 +9,9 @@ everything back and leaves no orphan ``documents`` row.
 from __future__ import annotations
 
 from pgvector.sqlalchemy import HALFVEC
-from sqlalchemy import Integer, Row, cast, func, select
+from sqlalchemy import Integer, Row, Text, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.types import UserDefinedType
 
 from app.generation.rag.schemas import EmbeddedChunk
 from app.generation.rag.store.models import ChunkRow, DocumentRow, EMBEDDING_DIMENSIONS
@@ -18,6 +19,63 @@ from app.generation.rag.store.models import ChunkRow, DocumentRow, EMBEDDING_DIM
 # The structural chunker emits one chunk per budget component; the vocabulary
 # is queryable thanks to the index on ``chunk_type`` (live-session filters).
 BUDGET_COMPONENT = "budget_component"
+
+# Postgres text-search configuration. MUST match the regconfig of the generated
+# ``content_tsv`` column (migration ``0003_session10_fts``) or the GIN index is
+# silently ignored and the lexical branch falls back to a sequential scan.
+FTS_REGCONFIG = "english"
+
+
+class _TSQuery(UserDefinedType):
+    """Minimal SQLAlchemy mapping for the Postgres ``tsquery`` type (cast target)."""
+
+    cache_ok = True
+
+    def get_col_spec(self, **kw):  # noqa: D401, ANN001, ANN003
+        return "tsquery"
+
+
+def _or_tsquery(query_text: str):
+    """Build an **OR** full-text query from free text.
+
+    ``plainto_tsquery`` ANDs every lexeme, which returns nothing for the long,
+    descriptive queries this branch sees (no single chunk contains *all* the
+    terms of a project description). We let Postgres normalize/stem the input
+    with ``plainto_tsquery`` and then flip the ``&`` operators to ``|`` so a
+    chunk matches on **any** salient term; ``ts_rank_cd`` still ranks chunks
+    sharing more (and rarer) terms higher. The replace is safe because
+    ``plainto_tsquery`` only ever emits ``&`` between quoted, sanitized lexemes.
+    """
+    plain = func.plainto_tsquery(FTS_REGCONFIG, query_text)
+    or_text = func.replace(cast(plain, Text), " & ", " | ")
+    return cast(or_text, _TSQuery())
+
+
+def _structural_filters(
+    *,
+    sectors: list[str] | None,
+    project_year_min: int | None,
+    project_year_max: int | None,
+    chunk_types: list[str] | None,
+) -> list:
+    """Build the shared ``(:filter IS NULL OR …)`` structural predicates.
+
+    Both retrieval branches (dense and lexical) pre-filter on the SAME axes so a
+    hybrid query never mixes candidates from different structural scopes.
+    """
+    sector_col = ChunkRow.metadata_["client_sector"].astext
+    year_col = cast(ChunkRow.metadata_["year"].astext, Integer)
+
+    filters = []
+    if sectors:
+        filters.append(sector_col.in_(sectors))
+    if project_year_min is not None:
+        filters.append(year_col >= project_year_min)
+    if project_year_max is not None:
+        filters.append(year_col <= project_year_max)
+    if chunk_types:
+        filters.append(ChunkRow.chunk_type.in_(chunk_types))
+    return filters
 
 
 class ChunkStore:
@@ -122,18 +180,12 @@ class ChunkStore:
             is how many chunks matched the structural filters before the
             threshold/limit were applied.
         """
-        sector_col = ChunkRow.metadata_["client_sector"].astext
-        year_col = cast(ChunkRow.metadata_["year"].astext, Integer)
-
-        structural_filters = []
-        if sectors:
-            structural_filters.append(sector_col.in_(sectors))
-        if project_year_min is not None:
-            structural_filters.append(year_col >= project_year_min)
-        if project_year_max is not None:
-            structural_filters.append(year_col <= project_year_max)
-        if chunk_types:
-            structural_filters.append(ChunkRow.chunk_type.in_(chunk_types))
+        structural_filters = _structural_filters(
+            sectors=sectors,
+            project_year_min=project_year_min,
+            project_year_max=project_year_max,
+            chunk_types=chunk_types,
+        )
 
         distance = cast(ChunkRow.embedding, HALFVEC(EMBEDDING_DIMENSIONS)).cosine_distance(
             query_vector
@@ -158,3 +210,55 @@ class ChunkStore:
         )
         rows = list((await session.execute(stmt)).all())
         return rows, candidates_evaluated
+
+    async def search_lexical(
+        self,
+        session: AsyncSession,
+        *,
+        query_text: str,
+        top_k: int = 50,
+        sectors: list[str] | None = None,
+        project_year_min: int | None = None,
+        project_year_max: int | None = None,
+        chunk_types: list[str] | None = None,
+    ) -> list[Row]:
+        """Lexical (keyword) branch of the hybrid retriever — full-text search.
+
+        Ranks chunks by ``ts_rank_cd`` over the generated ``content_tsv`` column
+        (``to_tsvector('english', content)``, GIN-indexed). The free-text query
+        is turned into an **OR** tsquery (see :func:`_or_tsquery`); ``@@`` keeps
+        the chunks matching any salient term before ranking. The ``'english'``
+        regconfig MUST match the column's (migration ``0003``) or the GIN index
+        is silently ignored.
+
+        Returns the matching rows ordered by descending lexical rank (best first)
+        with a ``rank`` column. Same structural pre-filters as the dense branch
+        so a hybrid query fuses candidates from one consistent scope. No distance
+        threshold here: the dense branch owns the relevance floor; lexical only
+        contributes ordering for the fusion.
+        """
+        tsquery = _or_tsquery(query_text)
+        rank = func.ts_rank_cd(ChunkRow.content_tsv, tsquery)
+
+        structural_filters = _structural_filters(
+            sectors=sectors,
+            project_year_min=project_year_min,
+            project_year_max=project_year_max,
+            chunk_types=chunk_types,
+        )
+
+        stmt = (
+            select(
+                ChunkRow.id,
+                ChunkRow.document_id,
+                ChunkRow.chunk_type,
+                ChunkRow.content,
+                ChunkRow.metadata_,
+                rank.label("rank"),
+            )
+            .where(*structural_filters)
+            .where(ChunkRow.content_tsv.op("@@")(tsquery))
+            .order_by(rank.desc())
+            .limit(top_k)
+        )
+        return list((await session.execute(stmt)).all())

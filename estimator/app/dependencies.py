@@ -136,6 +136,35 @@ def get_semantic_retriever() -> SemanticRetriever | None:
     )
 
 
+# --- Session 10: hybrid retrieval + reranking ------------------------------
+
+
+@lru_cache
+def get_runtime_retrieval_config():
+    """Redis-backed override store for the retrieval switches (search_mode / rerank).
+
+    Separate Redis hash from the LLM model knobs; same read-degrades /
+    write-raises failure semantics. Singleton is just the Redis handle —
+    freshness comes from reading Redis on every call."""
+    from app.foundation.llm.runtime_retrieval_config import RuntimeRetrievalConfig
+
+    settings = get_settings()
+    return RuntimeRetrievalConfig.from_url(settings.REDIS_URL, settings)
+
+
+@lru_cache
+def get_reranker():
+    """Cross-encoder reranker singleton (weights load lazily on first rerank).
+
+    Always constructible — the object is cheap; the torch weights only download
+    when ``rerank`` is actually exercised. ``scripts/verify_reranker.py`` forces
+    the load for warmup."""
+    from app.generation.rag.retrieval.reranker import CrossEncoderReranker
+
+    settings = get_settings()
+    return CrossEncoderReranker(model_name=settings.RERANKER_MODEL)
+
+
 # --- Session 9: RAG estimation pipeline (transcript → grounded estimate) ----
 
 
