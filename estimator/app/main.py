@@ -1,9 +1,11 @@
 import structlog
+import logfire
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from slowapi.errors import RateLimitExceeded
 
 from app.config import get_settings
@@ -14,11 +16,14 @@ from app.api import estimations, ingestion, sessions
 from app.api.rate_limiting import limiter, rate_limit_exceeded_handler
 from app.api.routers.estimate import router as estimate_router
 from app.api.routers.estimate_agent import router as estimate_agent_router
+from app.api.routers.estimate_graph import router as estimate_graph_router
 from app.api.routers.estimate_stages import router as estimate_stages_router
 from app.api.routers.estimate_tasks import router as estimate_tasks_router
 from app.api.routers.corpus_index import router as corpus_index_router
 from app.api.routers.retrieval import router as retrieval_router
 from app.api.routers.retrieval_advanced import router as retrieval_advanced_router
+from app.domain.graph.build import build_graph
+from app.foundation.persistence.database import langgraph_conn_string
 
 
 def configure_logging() -> None:
@@ -67,8 +72,12 @@ async def lifespan(app: FastAPI):
         )
     except Exception as exc:  # noqa: BLE001
         log.error("catalog_load_failed", error=str(exc)[:400])
-    log.info("application_started", environment=settings.APP_ENV)
-    yield
+    async with AsyncPostgresSaver.from_conn_string(langgraph_conn_string()) as checkpointer:
+        await checkpointer.setup()
+        app.state.estimation_graph = build_graph(checkpointer)
+        log.info("estimation_graph_ready")
+        log.info("application_started", environment=settings.APP_ENV)
+        yield
     log.info("application_shutdown")
 
 
@@ -80,6 +89,24 @@ app = FastAPI(
     redoc_url="/redoc",
     lifespan=lifespan,
 )
+
+
+def configure_observability(app: FastAPI) -> None:
+    """Wire Logfire tracing for FastAPI, asyncpg and httpx (OpenAI SDK)."""
+    settings = get_settings()
+    configure_kwargs: dict = {
+        "send_to_logfire": "if-token-present",
+        "service_name": settings.LOGFIRE_SERVICE_NAME,
+    }
+    if settings.LOGFIRE_TOKEN:
+        configure_kwargs["token"] = settings.LOGFIRE_TOKEN
+    logfire.configure(**configure_kwargs)
+    logfire.instrument_fastapi(app)
+    logfire.instrument_asyncpg()
+    logfire.instrument_httpx()
+
+
+configure_observability(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -129,6 +156,8 @@ app.include_router(estimate_stages_router)
 app.include_router(estimate_tasks_router)
 # Session 12 — hand-written agent over the budget retrieval (decision layer).
 app.include_router(estimate_agent_router)
+# Session 13 — explicit LangGraph estimation pipeline with Postgres checkpointing.
+app.include_router(estimate_graph_router)
 
 
 @app.get("/health")

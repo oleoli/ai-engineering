@@ -78,6 +78,21 @@ def create_async_engine_from_settings() -> AsyncEngine:
     )
 
 
+def langgraph_conn_string() -> str:
+    """Derive a plain psycopg DSN for LangGraph's ``AsyncPostgresSaver``.
+
+    The canonical ``DATABASE_URL`` uses a SQLAlchemy driver token
+    (``postgresql+psycopg://`` or ``+asyncpg``). LangGraph's checkpointer
+    expects a driverless ``postgresql://`` URI and manages its own psycopg3 pool.
+    """
+    url = get_settings().DATABASE_URL
+    if "+psycopg" in url:
+        return url.replace("+psycopg", "")
+    if "+asyncpg" in url:
+        return url.replace("+asyncpg", "")
+    return url
+
+
 @lru_cache
 def get_async_session_factory() -> async_sessionmaker:
     """Session factory for the async stack. ``expire_on_commit=False`` so ORM

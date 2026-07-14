@@ -234,6 +234,12 @@ class Settings(BaseSettings):
     AGENT_SEARCH_TOP_K: int = 5
     AGENT_SEARCH_DISTANCE_THRESHOLD: float = 0.6
 
+    # --- Session 13 fields (LangGraph estimation graph + Logfire) ---------------
+    # Optional Logfire token for distributed tracing. When absent, spans are
+    # collected locally only (send_to_logfire="if-token-present").
+    LOGFIRE_TOKEN: str | None = None
+    LOGFIRE_SERVICE_NAME: str = "estimator"
+
     @model_validator(mode="after")
     def validate_at_least_one_api_key(self) -> "Settings":
         """LiteLLM may try either provider via fallback, so we require at least one key."""
