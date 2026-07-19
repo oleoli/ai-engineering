@@ -340,6 +340,9 @@ https://logfire-eu.pydantic.dev/ole-oli/estimator-s13
 _(añadir aquí screenshot o pegado de la traza `graph_run` con los 5 spans hijos)_
 ![Traza Logfire S13](traza%20logfire.png)
 
+span link:
+
+https://logfire-eu.pydantic.dev/ole-oli/estimator-s13?q=trace_id%3D%27019f625367587d907d1970bfcc953720%27+and+span_id%3D%27ad098dc1d4bec82c%27&spanId=ad098dc1d4bec82c&traceId=019f625367587d907d1970bfcc953720&env=-clear-&since=2026-07-14T20%3A04%3A11.442041Z&until=2026-07-14T21%3A04%3A11.442041Z
 
 ---
 
